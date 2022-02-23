@@ -1,0 +1,17 @@
+*.pyc
+*.npy
+/__pycache__/*
+/data/__pycache__/*
+/layers/__pycache__/*
+/utils/__pycache__/*
+/loss/__pycache__/*
+/data/annotations
+/data/train2017
+/data/val2017
+/data/annotation.zip
+/data/train2017.zip
+/data/val2017.zip
+/data/coco
+/checkpoints
+/logs
+/weights
