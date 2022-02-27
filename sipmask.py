@@ -2,26 +2,24 @@ import tensorflow as tf
 
 from layers.fpn import FeaturePyramidNeck
 from layers.head import PredictionModule, FastMaskIoUNet
-from layers.protonet import ProtoNet
 import numpy as np
 assert tf.__version__.startswith('2')
 from detection import Detect
 from data import anchor
 from backbone import resnet
 
-class Yolact(tf.keras.Model):
+class SipMask(tf.keras.Model):
     """
-        Creating the YOLACT Architecture
+        Creating the SipMask Architecture
         Arguments:
 
     """
 
-    def __init__(self, img_h, img_w, fpn_channels, num_class, num_mask, 
-                 aspect_ratio, scales, use_dcn=False, 
-                 base_model_trainable=False,
-                 dcn_trainable=True,
-                 use_mask_iou=False):
-        super(Yolact, self).__init__()
+    def __init__(self, img_h, img_w, fpn_channels, num_class, 
+                strides=(4, 8, 16, 32, 64), use_dcn=False, 
+                base_model_trainable=False, dcn_trainable=True):
+        super(SipMask, self).__init__()
+        self.strides = strides
         out = ['conv3_block4_out', 'conv4_block6_out', 'conv5_block3_out']
 
         if not use_dcn:
@@ -69,49 +67,36 @@ class Yolact(tf.keras.Model):
             (self.feature_map_size, 
             [[out_height_p6, out_width_p6], [out_height_p7, out_width_p7]]), 
             axis=0)
-        # Only one upsampling on p3 
-        self.protonet_out_size = self.feature_map_size[0]*2 
 
+        self.nc = 32
         self.backbone_fpn = FeaturePyramidNeck(fpn_channels)
-        self.protonet = ProtoNet(num_mask)
+        
+        self.sip_cof = tf.keras.layers.Conv2D(self.nc*4, (3, 3), 1, 
+                padding="same",
+                kernel_initializer=tf.keras.initializers.TruncatedNormal(
+                  stddev=0.03))
 
-        # semantic segmentation branch to boost feature richness
-        self.semantic_segmentation = tf.keras.layers.Conv2D(
-            num_class-1, (1, 1), 1, padding="same",
-            kernel_initializer=tf.keras.initializers.glorot_uniform())
+        self.sip_mask_lat = tf.keras.layers.Conv2D(self.nc, (3, 3), 1, 
+                padding="same",
+                kernel_initializer=tf.keras.initializers.TruncatedNormal(
+                  stddev=0.03))
+        self.sip_mask_lat0 = tf.keras.layers.Conv2D(fpn_channels*2, 1, 1, 
+                padding="same",
+                kernel_initializer=tf.keras.initializers.TruncatedNormal(
+                  stddev=0.03))
 
-        anchorobj = anchor.Anchor(img_size_h=img_h,img_size_w=img_w,
-                              feature_map_size=self.feature_map_size,
-                              aspect_ratio=aspect_ratio,
-                              scale=scales)
-
-        self.num_anchors = anchorobj.num_anchors
-        self.priors = anchorobj.anchors
-
-        # shared prediction head
-        # Here, len(aspect_ratio) is passed as during prior calculations, 
-        # individula scale is selected for each layer.
-        # So, when scale are [24, 48, 96, 130, 192] that means 24 is for p3; 
-        # 48 is for p4 and so on.
-        # So, number of priors for that layer will be HxWxlen(aspect_ratio)
-        # Hence, passing len(aspect_ratio)
-        # This implementation differs from the original used in yolact
-        self.predictionHead = PredictionModule(256, len(aspect_ratio), 
-                                               num_class, num_mask)
-        if use_mask_iou:
-            self.fastMaskIoUNet = FastMaskIoUNet(num_class)
+        self.predictionHead = PredictionModule(256, num_class)
+        self.fastMaskIoUNet = FastMaskIoUNet(num_class)
 
         # post-processing for evaluation
         self.detect = Detect(num_class, max_output_size=300, 
             per_class_max_output_size=100,
-            conf_thresh=0.15, nms_thresh=0.5)
+            conf_thresh=0.05, nms_thresh=0.5)
         self.max_output_size = 300
 
     @tf.function
     def call(self, inputs, training=False):
-        # backbone(ResNet + FPN)
         inputs = tf.cast(inputs, tf.float32)
-        # inputs = inputs / 255.0
         inputs = tf.keras.applications.resnet50.preprocess_input(inputs)
 
         # https://www.tensorflow.org/tutorials/images/transfer_learning#\
@@ -120,38 +105,50 @@ class Yolact(tf.keras.Model):
         c3, c4, c5 = self.backbone_resnet(inputs, training=False)
         fpn_out = self.backbone_fpn(c3, c4, c5)
 
-        # Protonet branch
-        p3 = fpn_out[0]
-        protonet_out = self.protonet(p3)
-        # print("protonet: ", protonet_out.shape)
-
-        # semantic segmentation branch
-        seg = self.semantic_segmentation(p3)
-
         # Prediction Head branch
-        pred_cls = []
-        pred_offset = []
-        pred_mask_coef = []
+        cls_scores = []
+        bbox_preds = []
+        centernesses = []
+        cof_preds = []
+        feat_masks = []
+        count = 0
 
         # all output from FPN use same prediction head
-        for f_map in fpn_out:
-            cls, offset, coef = self.predictionHead(f_map)
-            pred_cls.append(cls)
-            pred_offset.append(offset)
-            pred_mask_coef.append(coef)
-            
-        pred_cls = tf.concat(pred_cls, axis=1)
-        pred_offset = tf.concat(pred_offset, axis=1)
-        pred_mask_coef = tf.concat(pred_mask_coef, axis=1)
+        for stride, f_map in zip(self.strides, fpn_out):
+            cof_pred, centerness, cls_score, bbox_pred, reg_feat = \
+               self.predictionHead(f_map)
+            cof_preds.append(cof_pred)
+            centernesses.append(centerness)
+            cls_scores.append(cls_score)
+            bbox_preds.append(bbox_pred*stride)
+
+            if count < 3:
+                if count == 0:
+                    feat_masks.append(reg_feat)
+                else:
+                    feat_up = tf.keras.layers.UpSampling2D(
+                        size=2 ** count, interpolation='bilinear')(reg_feat)
+                    feat_masks.append(feat_up)
+            count = count + 1
+        
+        feat_masks = tf.concat(feat_masks, dim=1)
+        feat_masks = tf.nn.relu(
+            self.sip_mask_lat(tf.nn.relu(self.sip_mask_lat0(feat_masks))))
+        feat_masks = tf.keras.layers.UpSampling2D(
+            size=4, interpolation='bilinear')(feat_masks)
+ 
+        cls_scores = tf.concat(cls_scores, axis=1)
+        bbox_preds = tf.concat(bbox_preds, axis=1)
+        centernesses = tf.concat(centernesses, axis=1)
+        cof_preds = tf.concat(cof_preds, axis=1)
 
         if training:
             pred = {
-                'pred_cls': pred_cls,
-                'pred_offset': pred_offset,
-                'pred_mask_coef': pred_mask_coef,
-                'proto_out': protonet_out,
-                'seg': seg,
-                'priors': self.priors
+                'cls_scores': cls_scores,
+                'bbox_preds': bbox_preds,
+                'centernesses': centernesses,
+                'cof_preds': cof_preds,
+                'feat_masks': feat_masks,
             }
             # Following to make both `if` and `else` return structure same
             result = {
@@ -163,12 +160,11 @@ class Yolact(tf.keras.Model):
             pred.update(result)
         else:
             pred = {
-                'pred_cls': pred_cls,
-                'pred_offset': pred_offset,
-                'pred_mask_coef': pred_mask_coef,
-                'proto_out': protonet_out,
-                'seg': seg,
-                'priors': self.priors
+                'cls_scores': cls_scores,
+                'bbox_preds': bbox_preds,
+                'centernesses': centernesses,
+                'cof_preds': cof_preds,
+                'feat_masks': feat_masks,
             }
 
             pred.update(self.detect(pred, img_shape=tf.shape(inputs)))

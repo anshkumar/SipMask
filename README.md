@@ -122,7 +122,11 @@ to this:
 #include "tensorflow/core/kernels/matmul_op_impl.h"
 ```
 
-Also, curently not able to compile with cuda 11.4.
+Also, with cuda 11.4+ where following error is coming:
+```
+status: Internal: too many resources requested for launch
+```
+need to reduce threads per block in `deformable_conv2d.patch`. For this change every occurrence of `config.thread_per_block` with `config.thread_per_block/2`.
 
 ## Create TFRecord for training 
 Refer to the tensorflow object detection api for tfrecord creation. ([link](https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/using_your_own_dataset.md))
