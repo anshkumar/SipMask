@@ -89,6 +89,7 @@ class PredictionModule(tf.keras.layers.Layer):
         for reg_layer in self.box_conv:
             reg_feat = reg_layer(reg_feat)
 
+        # TODO: add trainable scale parameter here.
         bbox_pred = self.fcos_reg(reg_feat)
         cls_feat = self.feat_align(cls_feat, bbox_pred)
         cls_score = self.fcos_cls(cls_feat)

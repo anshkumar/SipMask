@@ -114,6 +114,7 @@ class SipMask(tf.keras.Model):
         count = 0
 
         # all output from FPN use same prediction head
+        # TODO: add trainable scale parameter here.
         for stride, f_map in zip(self.strides, fpn_out):
             cof_pred, centerness, cls_score, bbox_pred, reg_feat = \
                self.predictionHead(f_map)

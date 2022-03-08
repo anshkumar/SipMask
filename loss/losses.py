@@ -3,7 +3,8 @@ import tensorflow_addons as tfa
 import time
 from utils import utils
 
-class YOLACTLoss(object):
+INF = 1e8
+class SipMaskLoss(object):
     def __init__(self, 
                  img_h,
                  img_w, 
@@ -44,11 +45,11 @@ class YOLACTLoss(object):
         """
         self.image = image
         # all prediction component
-        self.pred_cls = pred['pred_cls']
-        self.pred_offset = pred['pred_offset']
-        self.pred_mask_coef = pred['pred_mask_coef']
-        self.proto_out = pred['proto_out']
-        self.seg = pred['seg']
+        self.cls_scores = pred['cls_scores']
+        self.bbox_preds = pred['bbox_preds']
+        self.centernesses = pred['centernesses']
+        self.cof_preds = pred['cof_preds']
+        self.feat_masks = pred['feat_masks']
 
         # all label component
         self.gt_offset = label['all_offsets']
@@ -61,13 +62,9 @@ class YOLACTLoss(object):
         self.num_classes = num_classes
         self.model = model
 
-        # pos_boxes = []
-
-        # for i in range(label['all_offsets'].shape[0]):
-        #     boxes_decoded = model.detect._decode(label['all_offsets'][i], model.priors)
-        #     pos_indices = tf.where(self.conf_gt[i] > 0 )
-        #     pos_boxes_decoded = tf.gather_nd(boxes_decoded, pos_indices)
-        #     pos_boxes.append(pos_boxes_decoded.numpy())
+        # TODO: check the feature map size
+        featmap_sizes = [featmap.size()[1:-1] for featmap in cls_scores]
+        all_level_points, all_level_strides = self.get_points(featmap_sizes, bbox_preds[0].dtype)
 
         loc_loss = self._loss_location() 
 
@@ -364,43 +361,184 @@ class YOLACTLoss(object):
         ret = intersection / union
         return ret
 
-    def _loss_semantic_segmentation(self):
-        # Note num_classes here is without the background class so 
-        # cfg.num_classes-1
-        batch_size = tf.shape(self.seg)[0]
-        mask_h = tf.shape(self.seg)[1]
-        mask_w = tf.shape(self.seg)[2]
-        num_classes = tf.shape(self.seg)[3]
-        loss_s = 0.0
+    def fcos_target_single(self, gt_bboxes, gt_labels, points, regress_ranges,
+                           num_points_per_lvl):
+        '''
+        Function calculates bouding box targets and filters accoring to the 
+        following conditions:
+            1) location (x,y) is considered as a positive sample if it falls 
+                into any ground-truth box and the class label c∗ of the 
+                location is the class label of the ground-truth box. Otherwise 
+                it is a negative sample and c∗ = 0 (back- ground class).
+            2) We firstly compute the regression targets l∗, t∗, r∗ and b∗ for 
+                each location on all feature levels. Next, if a location 
+                satisfies max(l∗, t∗, r∗, b∗) > mi or max(l∗, t∗,r∗,b∗) < mi−1, 
+                it is set as a negative sample and is thus not required to 
+                regress a bounding box anymore. Here mi is the maximum 
+                distance that feature level i needs to regress. In this work, 
+                m2, m3, m4, m5, m6 and m7 are set as 0, 64, 128, 256, 512 and 
+                inf, respectively.
+            3) If a location falls into multiple bounding boxes, it is 
+                considered as an ambiguous sample. We simply choose the bounding
+                box with minimal area as its regression target 
+        If center_sampling is True then fcos_plus logic is used as in
+            https://github.com/yqyao/FCOS_PLUS/blob/master/fcos.pdf
 
-        for i in range(batch_size):
-            cur_segment = self.seg[i]
-            cur_class_gt = self.classes[i]
-            masks = self.masks[i]
+        Args:
+            gt_bboxes: Tensor of shape [num_gt_boxes_per_image, 4]. All the 
+                        ground truth bounding boxes per image.
+            gt_labels: Tensor of shape [num_gt_boxes_per_image]. Label of 
+                        ground truth bounding boxes.
+            points: Tensor of shape [num_points, 2]. (x,y) location of points 
+                        with repect to the original image.
+            regress_ranges: Tensor of shape [num_points, 2]. Max distance 
+                        (pixels) to search for a point in a bounding box.
+            num_points_per_lvl: List of shape [num_features_level]. Number of 
+                        points to take from each feature level.
+        Returns:
+            labels: Label for each point from the feature map. 0 for background.
+            bbox_targets: bbox target for each point from the feature map.
+            gt_ind: indicies of points matching with the ground truth.
+        '''
+        num_points = tf.shape(points)[0]
+        num_gts = tf.shape(gt_labels)[0]
 
-            masks = tf.expand_dims(masks, axis=-1)
-            masks = tf.image.resize(masks, [mask_h, mask_w], 
-                method=tf.image.ResizeMethod.BILINEAR)
-            masks = tf.cast(masks + 0.5, tf.int64)
-            masks = tf.squeeze(tf.cast(masks, tf.float32))
+        if num_gts == 0:
+            return tf.zeros(num_points, dtype=tf.int32), \
+                   tf.zeros((num_points, 4), dtype=tf.float32)
 
-            # [height, width, num_cls]; num_cls including background
-            segment_gt = tf.zeros((mask_h, mask_w, num_classes+1)) 
-            segment_gt = tf.transpose(segment_gt, perm=(2, 0, 1))
+        areas = (gt_bboxes[:, 2] - gt_bboxes[:, 0] + 1) * (
+            gt_bboxes[:, 3] - gt_bboxes[:, 1] + 1)
+        areas =  tf.tile(tf.expand_dims(areas, axis=0), (num_points, 1))
+        regress_ranges = tf.tile(
+            tf.expand_dims(regress_ranges, axis=1), (1, num_gts, 1))
+        gt_bboxes =  tf.tile(
+            tf.expand_dims(gt_bboxes, axis=0), (num_points, 1, 1))
 
-            obj_cls = tf.expand_dims(cur_class_gt, axis=-1)
-            segment_gt = tf.tensor_scatter_nd_max(segment_gt, indices=obj_cls, 
-                updates=masks)
-            segment_gt = tf.transpose(segment_gt, perm=(1, 2, 0))
+        xs, ys = points[:, 0], points[:, 1]
+        xs = tf.tile(tf.expand_dims(xs, axis=1), (1, num_gts))
+        ys = tf.tile(tf.expand_dims(ys, axis=1), (1, num_gts))
 
-            segment_gt = tf.expand_dims(segment_gt, axis=-1)
-            cur_segment = tf.sigmoid(cur_segment)
-            cur_segment = tf.expand_dims(cur_segment, axis=-1)
-            cce = tf.keras.losses.BinaryCrossentropy(from_logits=False,
-                reduction=tf.keras.losses.Reduction.NONE)
-            loss = cce(segment_gt[:,:,1:,:], cur_segment)
-            loss = tf.reduce_mean(loss)
-            loss_s += loss            
+        left = xs - gt_bboxes[..., 0]
+        right = gt_bboxes[..., 2] - xs
+        top = ys - gt_bboxes[..., 1]
+        bottom = gt_bboxes[..., 3] - ys
+        bbox_targets = tf.stack((left, top, right, bottom), -1)
 
-        loss_s /= tf.cast(batch_size, dtype=tf.float32)
-        return loss_s*self._loss_weight_seg
+        if self.center_sampling:
+            # condition1: inside a `center bbox`
+            radius = self.center_sample_radius
+            center_xs = (gt_bboxes[..., 0] + gt_bboxes[..., 2]) / 2
+            center_ys = (gt_bboxes[..., 1] + gt_bboxes[..., 3]) / 2
+            stride = tf.zeros_like(center_xs)
+
+            # project the points on current lvl back to the `original` sizes
+            lvl_begin = 0
+
+            for lvl_idx, num_points_lvl in enumerate(num_points_per_lvl):
+                lvl_end = lvl_begin + num_points_lvl
+
+                # slice and update as follows:  
+                #    stride[lvl_begin:lvl_end] = self.strides[lvl_idx] * radius
+                indices = tf.expand_dims(tf.range(lvl_begin,lvl_end), axis=-1)
+                updates = tf.tile(
+                    [[strides[lvl_idx] * radius]], [lvl_end-lvl_begin, num_gts])
+                stride = tf.tensor_scatter_nd_update(stride, indices, updates)
+
+                lvl_begin = lvl_end
+
+            x_mins = center_xs - stride
+            y_mins = center_ys - stride
+            x_maxs = center_xs + stride
+            y_maxs = center_ys + stride
+            center_gts_0 = tf.where(x_mins > gt_bboxes[..., 0],
+                                             x_mins, gt_bboxes[..., 0])
+            center_gts_1 = tf.where(y_mins > gt_bboxes[..., 1],
+                                             y_mins, gt_bboxes[..., 1])
+            center_gts_2 = tf.where(x_maxs > gt_bboxes[..., 2],
+                                             gt_bboxes[..., 2], x_maxs)
+            center_gts_3 = tf.where(y_maxs > gt_bboxes[..., 3],
+                                             gt_bboxes[..., 3], y_maxs)
+            center_gts = tf.stack(
+                (center_gts_0, center_gts_1, center_gts_2, center_gts_3), 
+                axis=-1)
+
+            cb_dist_left = xs - center_gts[..., 0]
+            cb_dist_right = center_gts[..., 2] - xs
+            cb_dist_top = ys - center_gts[..., 1]
+            cb_dist_bottom = center_gts[..., 3] - ys
+            center_bbox = tf.stack(
+                (cb_dist_left, cb_dist_top, cb_dist_right, cb_dist_bottom), -1)
+            inside_gt_bbox_mask = tf.math.reduce_min(center_bbox, axis=-1) > 0
+        else:
+            # condition1: inside a gt bbox
+            inside_gt_bbox_mask = tf.math.reduce_min(bbox_targets, axis=-1) > 0
+
+        # condition2: limit the regression range for each location
+        max_regress_distance = tf.math.reduce_max(bbox_targets, axis=-1)
+        inside_regress_range = (
+            max_regress_distance >= regress_ranges[..., 0]) & (
+                max_regress_distance <= regress_ranges[..., 1])
+
+        # if there are still more than one objects for a location,
+        # we choose the one with minimal area
+
+        # equivalent to:  areas[inside_gt_bbox_mask == 0] = INF
+        indices = tf.where(inside_gt_bbox_mask == False)
+        updates = tf.repeat(INF, tf.shape(indices)[0])
+        areas = tf.tensor_scatter_nd_update(areas, indices, updates)
+
+        # equivalent to: areas[inside_regress_range == 0] = INF
+        indices = tf.where(inside_regress_range == False)
+        updates = tf.repeat(INF, tf.shape(indices)[0])
+        areas = tf.tensor_scatter_nd_update(areas, indices, updates)
+
+        min_area = tf.reduce_min(areas, axis=1)
+        min_area_inds = tf.argmin(areas, axis=1)
+
+        # Equivalent to gt_labels[min_area_inds]
+        labels = tf.gather_nd(gt_labels, tf.expand_dims(min_area_inds, axis=-1))
+
+        # Equivalent to labels[min_area == INF] = 0
+        indices = tf.where(min_area == INF)
+        updates = tf.repeat(0, tf.shape(indices)[0])
+        areas = tf.tensor_scatter_nd_update(labels, indices, updates)
+
+        # Equivalent to bbox_targets[range(num_points), min_area_inds]
+        indices = tf.stack((tf.range(num_points, dtype=tf.int64), min_area_inds), axis=-1)
+        bbox_targets = tf.gather_nd(bbox_targets, indices)
+
+        indices = tf.where(labels > 0)
+        gt_ind = tf.gather_nd(min_area_inds, indices)
+
+        return labels, bbox_targets, gt_ind
+
+    def get_points(self, featmap_sizes, dtype):
+        """Get points according to feature map sizes.
+        Args:
+            featmap_sizes (list[tuple]): Multi-level feature map sizes.
+            dtype (torch.dtype): Type of points.
+        Returns:
+            tuple: points of each image.
+        """
+        mlvl_points = []
+        mlvl_strides = []
+        for i in range(tf.shape(featmap_sizes)[0]):
+            points, strides = self.get_points_single(featmap_sizes[i], self.strides[i],
+                                       dtype)
+            mlvl_points.append(points)
+            mlvl_strides.append(strides)
+
+        return mlvl_points, mlvl_strides
+
+    def get_points_single(self, featmap_size, stride, dtype):
+        h, w = featmap_size
+        x_range = tf.range(
+            0, w * stride, stride, dtype=dtype)
+        y_range = tf.range(
+            0, h * stride, stride, dtype=dtype)
+        y, x = tf.meshgrid(y_range, x_range, indexing='ij')
+        points = tf.stack(
+            (tf.rehape(x, (-1)), tf.reshape(y, (-1))), axis=-1) + stride // 2
+        strides = points[:,0]*0+stride
+        return points, strides
