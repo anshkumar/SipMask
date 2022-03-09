@@ -1,7 +1,6 @@
 import tensorflow as tf
 import tensorflow_addons as tfa
 import time
-from utils import utils
 
 INF = 1e8
 class SipMaskLoss(object):
@@ -442,7 +441,7 @@ class SipMaskLoss(object):
                 #    stride[lvl_begin:lvl_end] = self.strides[lvl_idx] * radius
                 indices = tf.expand_dims(tf.range(lvl_begin,lvl_end), axis=-1)
                 updates = tf.tile(
-                    [[strides[lvl_idx] * radius]], [lvl_end-lvl_begin, num_gts])
+                    [[self.strides[lvl_idx] * radius]], [lvl_end-lvl_begin, num_gts])
                 stride = tf.tensor_scatter_nd_update(stride, indices, updates)
 
                 lvl_begin = lvl_end
@@ -502,7 +501,7 @@ class SipMaskLoss(object):
         # Equivalent to labels[min_area == INF] = 0
         indices = tf.where(min_area == INF)
         updates = tf.repeat(0, tf.shape(indices)[0])
-        areas = tf.tensor_scatter_nd_update(labels, indices, updates)
+        labels = tf.tensor_scatter_nd_update(labels, indices, updates)
 
         # Equivalent to bbox_targets[range(num_points), min_area_inds]
         indices = tf.stack((tf.range(num_points, dtype=tf.int64), min_area_inds), axis=-1)
@@ -539,6 +538,6 @@ class SipMaskLoss(object):
             0, h * stride, stride, dtype=dtype)
         y, x = tf.meshgrid(y_range, x_range, indexing='ij')
         points = tf.stack(
-            (tf.rehape(x, (-1)), tf.reshape(y, (-1))), axis=-1) + stride // 2
+            (tf.reshape(x, (-1)), tf.reshape(y, (-1))), axis=-1) + stride // 2
         strides = points[:,0]*0+stride
         return points, strides
