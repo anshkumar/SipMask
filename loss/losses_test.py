@@ -6,6 +6,69 @@ import torch
 INF = 1e8
 class SipMaskLossTest(tf.test.TestCase, parameterized.TestCase):
 
+    def setUp(self):
+        self.loss = SipMaskLoss(550,550)
+        self.loss.center_sampling = True
+        self.loss.center_sample_radius = 1.5
+        self.loss.strides = [4, 8, 16, 32, 64]
+        self.strides = self.loss.strides
+        self.center_sample_radius = self.loss.center_sample_radius
+        self.featmap_sizes = [[100, 168], [50, 84], [25, 42], [13, 21], [7, 11]]
+        self.regress_ranges = (
+            (-1.0, 64.0), 
+            (64.0, 128.0), 
+            (128.0, 256.0), 
+            (256.0, 512.0), 
+            (512.0, INF))
+        self.loss.regress_ranges = self.regress_ranges
+
+    def fcos_target_pytorch(self, points, gt_bboxes_list, gt_labels_list):
+        assert len(points) == len(self.regress_ranges)
+        num_levels = len(points)
+        # expand regress ranges to align with points
+        expanded_regress_ranges = [
+            points[i].new_tensor(self.regress_ranges[i])[None].expand_as(
+                points[i]) for i in range(num_levels)
+        ]
+        # concat all levels points and regress ranges
+        concat_regress_ranges = torch.cat(expanded_regress_ranges, dim=0)
+        concat_points = torch.cat(points, dim=0)
+
+        # the number of points per img, per lvl
+        num_points = [center.size(0) for center in points]
+
+        # get labels and bbox_targets of each image
+        labels_list = []
+        bbox_targets_list = []
+        gt_inds = []
+        for gt_bboxes, gt_labels in zip(gt_bboxes_list, gt_labels_list):
+            labels, bbox_targets, gt_ind = self.fcos_target_single_pytorch(
+                gt_bboxes, gt_labels, concat_points, concat_regress_ranges, 
+                num_points)
+
+            labels_list.append(labels)
+            bbox_targets_list.append(bbox_targets)
+            gt_inds.append(gt_ind)
+
+        # split to per img, per level
+        labels_list = [labels.split(num_points, 0) for labels in labels_list]
+        bbox_targets_list = [
+            bbox_targets.split(num_points, 0)
+            for bbox_targets in bbox_targets_list
+        ]
+
+        # concat per level image
+        concat_lvl_labels = []
+        concat_lvl_bbox_targets = []
+        for i in range(num_levels):
+            concat_lvl_labels.append(
+                torch.cat([labels[i] for labels in labels_list]))
+            concat_lvl_bbox_targets.append(
+                torch.cat(
+                    [bbox_targets[i] for bbox_targets in bbox_targets_list]))
+        return concat_lvl_labels, concat_lvl_bbox_targets, labels_list, \
+                bbox_targets_list, gt_inds
+
     def fcos_target_single_pytorch(self, gt_bboxes, gt_labels, points, 
         regress_ranges, num_points_per_lvl):
 
@@ -126,14 +189,10 @@ class SipMaskLossTest(tf.test.TestCase, parameterized.TestCase):
         return points, strides
 
     @parameterized.parameters(
-        (
-            [[100, 168], [50, 84], [25, 42], [13, 21], [7, 11]], )
+            ([[100, 168], [50, 84], [25, 42], [13, 21], [7, 11]], )
         )
     def test_get_points(self, featmap_sizes):
-        loss = SipMaskLoss(550,550)  
-        loss.strides = [4, 8, 16, 32, 64] 
-        self.strides = loss.strides
-        all_level_points, all_level_strides = loss.get_points(
+        all_level_points, all_level_strides = self.loss.get_points(
             tf.constant(featmap_sizes), tf.float32)     
         all_level_points_t, all_level_strides_t = self.get_points_pytorch(
             featmap_sizes, torch.float32)
@@ -141,38 +200,50 @@ class SipMaskLossTest(tf.test.TestCase, parameterized.TestCase):
         self.assertAllClose(all_level_strides, all_level_strides_t)
 
     @parameterized.parameters(
-        (
-            tf.constant([[0.0, 0.0, 10.0, 10.0], [10.0, 10.0, 20.0, 20.0]]), 
+            (tf.constant([
+                        [[0.0, 0.0, 10.0, 10.0], [10.0, 10.0, 20.0, 20.0]],
+                        [[5.0, 5.0, 10.0, 10.0], [15.0, 15.0, 20.0, 20.0]]
+                        ]), 
+            tf.constant([[33,  1], [2,  14]])),
+        )
+    def test_fcos_target(self, gt_bboxes, gt_labels):
+        all_level_points, all_level_strides = self.loss.get_points(
+            tf.constant(self.featmap_sizes), tf.float32)
+        concat_lvl_labels, concat_lvl_bbox_targets, labels_list, \
+                bbox_targets_list, gt_inds_list = self.loss.fcos_target(
+                                        all_level_points, gt_bboxes, gt_labels)
+
+        all_level_points, _ = self.get_points_pytorch(self.featmap_sizes, 
+                                                        torch.float32)
+        concat_lvl_labels_t, concat_lvl_bbox_targets_t, labels_list_t, \
+                bbox_targets_list_t, gt_inds_list_t = self.fcos_target_pytorch(
+                    all_level_points, torch.tensor(gt_bboxes.numpy()), 
+                                            torch.tensor(gt_labels.numpy()))
+
+        self.assertAllClose(concat_lvl_labels, concat_lvl_labels_t)
+        self.assertAllClose(concat_lvl_bbox_targets, concat_lvl_bbox_targets_t)
+        self.assertAllClose(labels_list, labels_list_t)
+        self.assertAllClose(bbox_targets_list, bbox_targets_list_t)
+        self.assertAllClose(gt_inds_list, gt_inds_list_t)
+
+    @parameterized.parameters(
+            (tf.constant([[0.0, 0.0, 10.0, 10.0], [10.0, 10.0, 20.0, 20.0]]), 
             tf.constant([33,  1])),
         )
     def test_fcos_target_single(self, gt_bboxes, gt_labels):
-        loss = SipMaskLoss(550,550)
-        loss.center_sampling = True
-        loss.center_sample_radius = 1.5
-        loss.strides = [4, 8, 16, 32, 64]
-        self.strides = loss.strides
-        self.center_sample_radius = loss.center_sample_radius
-        featmap_sizes = [[100, 168], [50, 84], [25, 42], [13, 21], [7, 11]]
-
-        all_level_points, all_level_strides = loss.get_points(
-            tf.constant(featmap_sizes), tf.float32)
+        all_level_points, all_level_strides = self.loss.get_points(
+            tf.constant(self.featmap_sizes), tf.float32)
         num_points_per_lvl = [tf.shape(center)[0].numpy() \
                                 for center in all_level_points]
         points =  tf.concat(all_level_points, axis=0)
 
-        regress_ranges = (
-            (-1.0, 64.0), 
-            (64.0, 128.0), 
-            (128.0, 256.0), 
-            (256.0, 512.0), 
-            (512.0, INF))
         regress_ranges = [tf.tile(
-            tf.expand_dims(regress_ranges[i], axis=0),
+            tf.expand_dims(self.regress_ranges[i], axis=0),
             (tf.shape(all_level_points[i])[0], 1)) \
             for i in range(len(all_level_points))]
         regress_ranges = tf.concat(regress_ranges, axis=0)
         
-        labels, bbox_targets, gt_ind = loss.fcos_target_single(
+        labels, bbox_targets, gt_ind = self.loss.fcos_target_single(
             gt_bboxes, gt_labels, points, regress_ranges, num_points_per_lvl)
         labels_t, bbox_targets_t, gt_ind_t = self.fcos_target_single_pytorch(
             torch.tensor(gt_bboxes.numpy()), torch.tensor(gt_labels.numpy()), 

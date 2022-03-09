@@ -360,6 +360,87 @@ class SipMaskLoss(object):
         ret = intersection / union
         return ret
 
+    def fcos_target(self, points, gt_bboxes_list, gt_labels_list):
+        '''
+        Function calculates bouding box targets for a batch of images by 
+        calling fcos_target_single for every single image.
+
+        Args:
+            points: List of shape [Num_level]. Each entry is of shape 
+                    [num_point, 2]. Points for evry level of fpn.
+            gt_bboxes_list: Tensor of shape [num_images_batch, num_bboxes, 4].
+                            All the ground truth bounding boxes for a batch.
+            gt_labels_list: Tensor of shape [num_images_batch, num_bboxes].
+                            Label of ground truth bounding boxes for a batch.
+
+        Returns:
+            concat_lvl_labels: List of shape [Num_level]. Each entry is of shape 
+                            [num_point_level*num_images_batch].
+                            labels concatenated to per level for a batch of 
+                            images.
+            concat_lvl_bbox_targets: List of shape [Num_level]. Each entry is of
+                            shape [num_point_level*num_images_batch, 4]. 
+                            bbox_targets concatenated to per level for a batch 
+                            of images.
+            labels_list:  List of shape [num_images_batch]. Each entry is of
+                            shape [num_point_level]. labels list splited to per 
+                            image, per level.
+            bbox_targets_list: List of shape [num_images_batch]. Each entry is 
+                            of shape [num_point_level, 4]. bbox targets splited 
+                            to per image, per level.
+            gt_inds_list: List of shape [num_images_batch]. indicies of points 
+                            matching with the ground truth for a batch of 
+                            images.
+
+        '''
+
+        num_levels = len(points)
+        expanded_regress_ranges = [tf.tile(
+            tf.expand_dims(self.regress_ranges[i], axis=0),
+            (tf.shape(points[i])[0], 1)) \
+            for i in range(len(points))]
+        concat_regress_ranges = tf.concat(expanded_regress_ranges, axis=0)
+
+        concat_points =  tf.concat(points, axis=0)
+
+        num_points = [tf.shape(center)[0] \
+                        for center in points]
+
+        labels_list = []
+        bbox_targets_list = []
+        gt_inds_list = []
+        for gt_bboxes, gt_labels in zip(gt_bboxes_list, gt_labels_list):
+            labels, bbox_targets, gt_inds = self.fcos_target_single(gt_bboxes, 
+                gt_labels, concat_points, concat_regress_ranges, num_points)
+
+            labels_list.append(labels)
+            bbox_targets_list.append(bbox_targets)
+            gt_inds_list.append(gt_inds)
+
+        # split to per img, per level
+        labels_list = [
+            tf.split(labels, num_points, axis=0) for labels in labels_list]
+
+        bbox_targets_list = [
+            tf.split(bbox_targets, num_points, axis=0)
+            for bbox_targets in bbox_targets_list
+        ]
+
+        # concat per level image
+        concat_lvl_labels = []
+        concat_lvl_bbox_targets = []
+        for i in range(num_levels):
+            concat_lvl_labels.append(
+                tf.concat([labels[i] for labels in labels_list], axis=0))
+            concat_lvl_bbox_targets.append(
+                tf.concat(
+                    [bbox_targets[i] for bbox_targets in bbox_targets_list], 
+                    axis=0))
+        
+        return concat_lvl_labels, concat_lvl_bbox_targets, labels_list, \
+                bbox_targets_list, gt_inds_list
+
+
     def fcos_target_single(self, gt_bboxes, gt_labels, points, regress_ranges,
                            num_points_per_lvl):
         '''
