@@ -9,7 +9,6 @@ class Parser(object):
 
     def __init__(self,
                  output_size,
-                 anchor_instance,
                  match_threshold=0.5,
                  unmatched_threshold=0.4,
                  num_max_fix_padding=100,
@@ -26,7 +25,6 @@ class Parser(object):
 
         self._output_size_h = output_size[0]
         self._output_size_w = output_size[1]
-        self._anchor_instance = anchor_instance
         self._match_threshold = match_threshold
         self._unmatched_threshold = unmatched_threshold
 
@@ -96,11 +94,6 @@ class Parser(object):
         boxes_norm = boxes
         boxes = boxes * [self._output_size_h, self._output_size_w, self._output_size_h , self._output_size_w]
         
-        # matching anchors
-        all_offsets, conf_gt, prior_max_box, prior_max_index = \
-        self._anchor_instance.matching(
-            self._match_threshold, self._unmatched_threshold, boxes_norm, classes)
-
         # number of object in training sample
         num_obj = tf.size(classes)
 
@@ -111,6 +104,7 @@ class Parser(object):
         pad_masks = tf.zeros([num_padding, self._proto_output_size[0], 
             self._proto_output_size[1]])
         boxes_norm = tf.concat([boxes_norm, pad_boxes], axis=0)
+        boxes = tf.concat([boxes, pad_boxes], axis=0)
 
         if tf.shape(classes)[0] == 1:
             masks = tf.expand_dims(masks, axis=0)
@@ -119,11 +113,8 @@ class Parser(object):
         classes = tf.concat([classes, pad_classes], axis=0)
 
         labels = {
-            'all_offsets': all_offsets,
-            'conf_gt': conf_gt,
-            'prior_max_box': prior_max_box,
-            'prior_max_index': prior_max_index,
             'boxes_norm': boxes_norm,
+            'boxes': boxes,
             'classes': classes,
             'num_obj': num_obj,
             'mask_target': masks,

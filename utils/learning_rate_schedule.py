@@ -6,7 +6,7 @@ Custom learning rate scheduler for yolact
 """
 
 # https://github.com/tensorflow/models/blob/1b5a4c9ed33242783eaf29e664618331dbb59e1b/research/object_detection/utils/learning_schedules.py#L85
-class Yolact_LearningRateSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+class LearningRateSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
     """Cosine decay schedule with warm up period.
     Cosine annealing learning rate as described in:
     Loshchilov and Hutter, SGDR: Stochastic Gradient Descent with Warm Restarts.
@@ -22,7 +22,7 @@ class Yolact_LearningRateSchedule(tf.keras.optimizers.schedules.LearningRateSche
         :param warmup_lr:
         :param initial_lr:
         """
-        super(Yolact_LearningRateSchedule, self).__init__()
+        super(LearningRateSchedule, self).__init__()
         self.warmup_step = warmup_steps
         self.warmup_lr = warmup_lr
         self.initial_lr = initial_lr

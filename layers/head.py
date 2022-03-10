@@ -37,7 +37,7 @@ class FastMaskIoUNet(tf.keras.layers.Layer):
 
 class PredictionModule(tf.keras.layers.Layer):
 
-    def __init__(self, out_channels, num_class, stacked_convs=2):
+    def __init__(self, out_channels, num_class, nc, stacked_convs=2):
         super(PredictionModule, self).__init__()
 
         self.norm_class_conv =  tfa.layers.GroupNormalization(32)
@@ -47,21 +47,19 @@ class PredictionModule(tf.keras.layers.Layer):
 
         for i in range(stacked_convs-1):
             self.class_conv.append(
-              self.norm_class_conv(
                 tf.keras.layers.Conv2D(out_channels, (3, 3), 1, 
                   padding="same",
                   kernel_initializer=tf.keras.initializers.VarianceScaling(
                     mode="fan_avg", distribution='uniform'),
-                  use_bias=False)))
+                  use_bias=False))
 
         for i in range(stacked_convs):
             self.box_conv.append(
-              self.norm_box_conv(
                 tf.keras.layers.Conv2D(out_channels, (3, 3), 1, 
                   padding="same",
                   kernel_initializer=tf.keras.initializers.VarianceScaling(
                     mode="fan_avg", distribution='uniform'),
-                  use_bias=False)))
+                  use_bias=False))
 
 
         self.fcos_cls = tf.keras.layers.Conv2D(num_class-1, (3, 3), 1, 
@@ -78,16 +76,22 @@ class PredictionModule(tf.keras.layers.Layer):
                 padding="same",
                 kernel_initializer=tf.keras.initializers.TruncatedNormal(
                   stddev=0.03))
+
+        self.sip_cof = tf.keras.layers.Conv2D(nc*4, (3, 3), 1, 
+                padding="same",
+                kernel_initializer=tf.keras.initializers.TruncatedNormal(
+                  stddev=0.03))
+
         self.feat_align = FeatureAlign(out_channels)
 
     def call(self, p):
         cls_feat = p
         reg_feat = p
         for cls_layer in self.class_conv:
-            cls_feat = cls_layer(cls_feat)
+            cls_feat = self.norm_class_conv(cls_layer(cls_feat))
 
         for reg_layer in self.box_conv:
-            reg_feat = reg_layer(reg_feat)
+            reg_feat = self.norm_box_conv(reg_layer(reg_feat))
 
         # TODO: add trainable scale parameter here.
         bbox_pred = self.fcos_reg(reg_feat)

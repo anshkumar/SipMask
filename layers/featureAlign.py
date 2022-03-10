@@ -32,7 +32,6 @@ class FeatureAlign(tf.keras.layers.Layer):
             use_bias=True,
             kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01)
         )
-        self.relu = tf.nn.relu()
         self.norm =  tfa.layers.GroupNormalization(32)
         self.flag_norm = flag_norm
 
@@ -42,9 +41,9 @@ class FeatureAlign(tf.keras.layers.Layer):
         offset = tf.transpose(offset, (0, 3, 1, 2))
 
         if self.flag_norm:
-            x = self.relu(
+            x = tf.nn.relu(
                 self.norm(self.conv_adaption([x, offset, self.null_mask])))
         else:
-            x = self.relu(self.conv_adaption([x, offset, self.null_mask]))
+            x = tf.nn.relu(self.conv_adaption([x, offset, self.null_mask]))
         return tf.transpose(out, (0, 2, 3, 1))
 

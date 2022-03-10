@@ -11,10 +11,9 @@ from absl import app
 from absl import flags
 from absl import logging
 import os
-import yolact
-from yolactModule import YOLACTModule
+import sipmask
 from data import dataset_coco
-from loss import loss_yolact
+from loss import losses
 from utils import learning_rate_schedule
 from utils import coco_evaluation
 from utils import standard_fields
@@ -25,6 +24,12 @@ from google.protobuf import text_format
 from protos import string_int_label_map_pb2
 
 tf.random.set_seed(123)
+physical_devices = tf.config.list_physical_devices('GPU')
+try:
+    tf.config.experimental.set_memory_growth(physical_devices[0], True)
+except:
+    print("Invalid device or cannot modify virtual devices once initialized.")
+    pass
 
 FLAGS = flags.FLAGS
 
@@ -54,10 +59,6 @@ flags.DEFINE_integer('img_h', 550,
                      'image height')
 flags.DEFINE_integer('img_w', 550,
                      'image width')
-flags.DEFINE_list('aspect_ratio', [1, 0.5, 2],
-                   'comma-separated list of strings for aspect ratio')
-flags.DEFINE_list('scale', [24, 48, 96, 192, 384],
-                   'comma-separated list of strings for scales in pixels')
 flags.DEFINE_float('lr', 1e-3,
                    'learning rate')
 flags.DEFINE_float('warmup_lr', 1e-4,
@@ -178,18 +179,14 @@ def main(argv):
       logging.info("DCN layer in the base model is NOT trainable.")
       dcn_trainable = False
 
-    model = yolact.Yolact(
+    model = sipmask.SipMask(
       img_h=FLAGS.img_h, 
       img_w=FLAGS.img_w,
       fpn_channels=256,
       num_class=FLAGS.num_class+1, # adding background class
-      num_mask=32,
-      aspect_ratio=[float(i) for i in FLAGS.aspect_ratio],
-      scales=[int(i) for i in FLAGS.scale],
       use_dcn=FLAGS.use_dcn,
       base_model_trainable=FLAGS.base_model_trainable,
-      dcn_trainable=dcn_trainable,
-      use_mask_iou=FLAGS.use_mask_iou)
+      dcn_trainable=dcn_trainable)
 
     if FLAGS.model_quantization:
       logging.info("Quantization aware training")
@@ -202,10 +199,6 @@ def main(argv):
     train_dataset = dataset_coco.prepare_dataloader(
       img_h=FLAGS.img_h, 
       img_w=FLAGS.img_w,
-      feature_map_size=model.feature_map_size, 
-      protonet_out_size=model.protonet_out_size,
-      aspect_ratio=[float(i) for i in FLAGS.aspect_ratio], 
-      scale=[int(i) for i in FLAGS.scale],
       tfrecord_dir=FLAGS.tfrecord_train_dir,
       batch_size=FLAGS.batch_size,
       subset='train')
@@ -215,10 +208,6 @@ def main(argv):
     valid_dataset = dataset_coco.prepare_dataloader(
       img_h=FLAGS.img_h, 
       img_w=FLAGS.img_w,
-      feature_map_size=model.feature_map_size, 
-      protonet_out_size=model.protonet_out_size,
-      aspect_ratio=[float(i) for i in FLAGS.aspect_ratio], 
-      scale=[int(i) for i in FLAGS.scale],
       tfrecord_dir=FLAGS.tfrecord_val_dir,
       batch_size=1,
       subset='val')
@@ -259,25 +248,25 @@ def main(argv):
       # lr_schedule = tf.optimizers.schedules.PiecewiseConstantDecay(
       #   [FLAGS.warmup_steps, int(0.35*FLAGS.train_iter), int(0.75*FLAGS.train_iter), int(0.875*FLAGS.train_iter), int(0.9375*FLAGS.train_iter)], 
       #   [FLAGS.warmup_lr, FLAGS.lr, 0.1*FLAGS.lr, 0.01*FLAGS.lr, 0.001*FLAGS.lr, 0.0001*FLAGS.lr])
-      lr_schedule = learning_rate_schedule.Yolact_LearningRateSchedule(
+      lr_schedule = learning_rate_schedule.LearningRateSchedule(
         warmup_steps=FLAGS.warmup_steps, 
         warmup_lr=FLAGS.warmup_lr,
         initial_lr=FLAGS.lr, 
         total_steps=FLAGS.lr_total_steps)
-      optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=FLAGS.momentum, clipnorm=10)
+      optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=FLAGS.momentum)
     else:
       # wd = lambda: FLAGS.weight_decay * lr_schedule(lr_schedule.global_step)
       logging.info("Using Adam optimizer")
-      lr_schedule = learning_rate_schedule.Yolact_LearningRateSchedule(
+      lr_schedule = learning_rate_schedule.LearningRateSchedule(
         warmup_steps=FLAGS.warmup_steps, 
         warmup_lr=FLAGS.warmup_lr,
         initial_lr=FLAGS.lr, 
         total_steps=FLAGS.lr_total_steps)
       optimizer = tfa.optimizers.AdamW(
         learning_rate=lr_schedule, 
-        weight_decay=FLAGS.weight_decay, clipnorm=10)
-    criterion = loss_yolact.YOLACTLoss(img_h= FLAGS.img_h, img_w=FLAGS.img_w,
-                                        use_mask_iou=FLAGS.use_mask_iou)
+        weight_decay=FLAGS.weight_decay)
+
+    criterion = losses.SipMaskLoss(img_h= FLAGS.img_h, img_w=FLAGS.img_w)
     train_loss = tf.keras.metrics.Mean('train_loss', dtype=tf.float32)
     valid_loss = tf.keras.metrics.Mean('valid_loss', dtype=tf.float32)
     loc = tf.keras.metrics.Mean('loc_loss', dtype=tf.float32)

@@ -70,11 +70,6 @@ class SipMask(tf.keras.Model):
 
         self.nc = 32
         self.backbone_fpn = FeaturePyramidNeck(fpn_channels)
-        
-        self.sip_cof = tf.keras.layers.Conv2D(self.nc*4, (3, 3), 1, 
-                padding="same",
-                kernel_initializer=tf.keras.initializers.TruncatedNormal(
-                  stddev=0.03))
 
         self.sip_mask_lat = tf.keras.layers.Conv2D(self.nc, (3, 3), 1, 
                 padding="same",
@@ -85,7 +80,7 @@ class SipMask(tf.keras.Model):
                 kernel_initializer=tf.keras.initializers.TruncatedNormal(
                   stddev=0.03))
 
-        self.predictionHead = PredictionModule(256, num_class)
+        self.predictionHead = PredictionModule(256, num_class, self.nc)
         self.fastMaskIoUNet = FastMaskIoUNet(num_class)
 
         # post-processing for evaluation
@@ -132,17 +127,12 @@ class SipMask(tf.keras.Model):
                     feat_masks.append(feat_up)
             count = count + 1
         
-        feat_masks = tf.concat(feat_masks, dim=1)
+        feat_masks = tf.concat(feat_masks, axis=-1)
         feat_masks = tf.nn.relu(
             self.sip_mask_lat(tf.nn.relu(self.sip_mask_lat0(feat_masks))))
         feat_masks = tf.keras.layers.UpSampling2D(
             size=4, interpolation='bilinear')(feat_masks)
  
-        cls_scores = tf.concat(cls_scores, axis=1)
-        bbox_preds = tf.concat(bbox_preds, axis=1)
-        centernesses = tf.concat(centernesses, axis=1)
-        cof_preds = tf.concat(cof_preds, axis=1)
-
         if training:
             pred = {
                 'cls_scores': cls_scores,

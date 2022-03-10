@@ -13,8 +13,7 @@ class SipMaskLoss(object):
                  loss_weight_mask_iou=25.0,
                  loss_seg=1.0,
                  neg_pos_ratio=3,
-                 max_masks_for_train=100, 
-                 use_mask_iou=False):
+                 max_masks_for_train=100):
         self.img_h = img_h
         self.img_w = img_w
         self._loss_weight_cls = loss_weight_cls
@@ -24,7 +23,15 @@ class SipMaskLoss(object):
         self._loss_weight_seg = loss_seg
         self._neg_pos_ratio = neg_pos_ratio
         self._max_masks_for_train = max_masks_for_train
-        self.use_mask_iou = use_mask_iou
+        self.center_sampling = True
+        self.center_sample_radius = 1.5
+        self.strides = [4, 8, 16, 32, 64]
+        self.regress_ranges = (
+            (-1.0, 64.0), 
+            (64.0, 128.0), 
+            (128.0, 256.0), 
+            (256.0, 512.0), 
+            (512.0, INF))
 
     def __call__(self, model, pred, label, num_classes, image = None):
         """
@@ -53,14 +60,18 @@ class SipMaskLoss(object):
         # all label component
         self.gt_bboxes = label['boxes']
         self.masks = label['mask_target']
-        self.gt_labels = label['classes']
+        self.gt_labels = tf.cast(label['classes'], tf.int32)
         self.num_classes = num_classes
         self.model = model
 
         all_level_points, all_level_strides = self.get_points(
-            self.model.feature_map_size, bbox_preds[0].dtype)
-        
-        
+            self.model.feature_map_size, tf.float32)
+                
+        labels, bbox_targets, label_list, bbox_targets_list, gt_inds = \
+            self.fcos_target(all_level_points, self.gt_bboxes, self.gt_labels)
+        import pdb
+        pdb.set_trace()
+
     def _loss_location(self):
         pass
 
