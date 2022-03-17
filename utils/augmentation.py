@@ -1481,7 +1481,7 @@ def random_adjust_saturation(image,
   image = _augment_only_rgb_channels(image, _adjust_saturation)
   return image
 
-def random_augmentation(img, bboxes, masks, output_size, proto_output_size, classes):
+def random_augmentation(img, bboxes, masks, output_size, classes):
     # generate random
     FLAGS = tf.random.uniform([6], minval=0, maxval=1)
     # FLAG_ROTATE = FLAGS[3]

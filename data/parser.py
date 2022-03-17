@@ -12,7 +12,6 @@ class Parser(object):
                  match_threshold=0.5,
                  unmatched_threshold=0.4,
                  num_max_fix_padding=100,
-                 proto_output_size=[138,138],
                  skip_crow_during_training=True,
                  use_bfloat16=True,
                  mode=None):
@@ -31,8 +30,6 @@ class Parser(object):
         # output related
         # for classes and mask to be padded to fix length
         self._num_max_fix_padding = num_max_fix_padding
-        # resize the mask to proto output size in advance 
-        self._proto_output_size = proto_output_size
 
         # Device.
         self._use_bfloat16 = use_bfloat16
@@ -74,7 +71,7 @@ class Parser(object):
         if augment:
             image, boxes, masks, classes = augmentation.random_augmentation(
                 image, boxes, masks, [self._output_size_h, self._output_size_w],
-                self._proto_output_size, classes)
+                classes)
 
         masks = tf.expand_dims(masks, axis=-1)
 
@@ -82,8 +79,7 @@ class Parser(object):
             [self._output_size_h, self._output_size_w])
 
         masks = tf.image.resize(masks, 
-            [self._proto_output_size[0], self._proto_output_size[1]],
-            method=tf.image.ResizeMethod.BILINEAR)
+            [self._output_size_h, self._output_size_w])
 
         masks = tf.squeeze(masks)
         masks = tf.cast(masks + 0.5, tf.uint8)
@@ -101,8 +97,8 @@ class Parser(object):
         num_padding = self._num_max_fix_padding - tf.shape(classes)[0]
         pad_classes = tf.zeros([num_padding], dtype=tf.int64)
         pad_boxes = tf.zeros([num_padding, 4])
-        pad_masks = tf.zeros([num_padding, self._proto_output_size[0], 
-            self._proto_output_size[1]])
+        pad_masks = tf.zeros([num_padding, self._output_size_h, 
+            self._output_size_w])
         boxes_norm = tf.concat([boxes_norm, pad_boxes], axis=0)
         boxes = tf.concat([boxes, pad_boxes], axis=0)
 

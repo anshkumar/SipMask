@@ -4,6 +4,10 @@ from layers.featureAlign import FeatureAlign
 
 class FastMaskIoUNet(tf.keras.layers.Layer):
     def __init__(self, num_class):
+        """
+        Args:
+            num_class: Num_classes + 1 for background
+        """
         super(FastMaskIoUNet, self).__init__()
 
         self.conv1 = tf.keras.layers.Conv2D(16, (3, 3), 2,
@@ -38,6 +42,10 @@ class FastMaskIoUNet(tf.keras.layers.Layer):
 class PredictionModule(tf.keras.layers.Layer):
 
     def __init__(self, out_channels, num_class, nc, stacked_convs=2):
+        """
+        Args:
+            num_class: Num_classes + 1 for background
+        """
         super(PredictionModule, self).__init__()
 
         self.norm_class_conv =  tfa.layers.GroupNormalization(32)

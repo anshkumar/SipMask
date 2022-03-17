@@ -188,6 +188,45 @@ class SipMaskLossTest(tf.test.TestCase, parameterized.TestCase):
         strides = points[:,0]*0+stride
         return points, strides
 
+    def centerness_target_pytorch(self, pos_bbox_targets):
+        # only calculate pos centerness targets, otherwise there may be nan
+        left_right = pos_bbox_targets[:, [0, 2]]
+        top_bottom = pos_bbox_targets[:, [1, 3]]
+        centerness_targets = (
+            left_right.min(dim=-1)[0] / left_right.max(dim=-1)[0]) * (
+                top_bottom.min(dim=-1)[0] / top_bottom.max(dim=-1)[0])
+        return torch.sqrt(centerness_targets)
+
+    # @parameterized.parameters(
+    #         ([[-0.96260047,  0.5351808 ,  0.11765705, -0.65827477,
+    #              0.6153985 , -0.33301416],
+    #            [-1.9649765 ,  0.6486603 ,  0.6216589 , -0.9070863 ,
+    #             -0.28419286, -0.11695653],
+    #            [-1.9652086 ,  0.61087036,  0.71910125, -0.31642425,
+    #              0.02182993, -0.19831532]], 
+    #         [0, 4, 0],
+    #         )
+    #     )
+    # def test_focal_conf_sigmoid_loss(self, flatten_cls_scores, flatten_labels,
+    #     avg_factor):
+
+    #     self.loss.num_classes = 6
+    #     loss_cls = self.loss._focal_conf_sigmoid_loss(flatten_cls_scores, 
+    #         flatten_labels, 3)
+
+    @parameterized.parameters(
+            ([[  1.6697693 ,   9.82251   ,   8.641907  ,  21.211517  ],
+               [  5.6697693 ,   9.82251   ,   4.6419067 ,  21.211517  ],
+               [  9.669769  ,   9.82251   ,   0.64190674,  21.211517  ],
+               [  1.6697693 ,  13.82251   ,   8.641907  ,  17.211517  ]], )
+        )
+    def test_centerness_target(self, pos_bbox_targets):
+        centerness = self.loss._centerness_target(tf.constant(pos_bbox_targets))
+        centerness_targets = self.centerness_target_pytorch(
+                torch.tensor(pos_bbox_targets))
+
+        self.assertAllClose(centerness, centerness_targets)
+
     @parameterized.parameters(
             ([[100, 168], [50, 84], [25, 42], [13, 21], [7, 11]], )
         )

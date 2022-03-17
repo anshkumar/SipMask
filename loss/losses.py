@@ -35,48 +35,132 @@ class SipMaskLoss(object):
 
     def __call__(self, model, pred, label, num_classes, image = None):
         """
-        :param num_classes:
-        :param anchors:
-        :param label: labels dict from dataset
-            all_offsets: the transformed box coordinate offsets of each pair of 
-                      prior and gt box
-            conf_gt: the foreground and background labels according to the 
-                     'pos_thre' and 'neg_thre',
-                     '0' means background, '>0' means foreground.
-            prior_max_box: the corresponding max IoU gt box for each prior
-            prior_max_index: the index of the corresponding max IoU gt box for 
-                      each prior
-        :param pred:
-        :return:
+        Args:
+            num_classes: Num_classes + 1 for background
+            anchors:
+            label: labels dict from dataset
+                all_offsets: the transformed box coordinate offsets of each pair of 
+                          prior and gt box
+                conf_gt: the foreground and background labels according to the 
+                         'pos_thre' and 'neg_thre',
+                         '0' means background, '>0' means foreground.
+                prior_max_box: the corresponding max IoU gt box for each prior
+                prior_max_index: the index of the corresponding max IoU gt box for 
+                          each prior
+            pred:
+        Returns:
         """
         self.image = image
         # all prediction component
-        self.cls_scores = pred['cls_scores']
-        self.bbox_preds = pred['bbox_preds']
-        self.centernesses = pred['centernesses']
-        self.cof_preds = pred['cof_preds']
-        self.feat_masks = pred['feat_masks']
+        cls_scores = pred['cls_scores']
+        bbox_preds = pred['bbox_preds']
+        centernesses = pred['centernesses']
+        cof_preds = pred['cof_preds']
+        feat_masks = pred['feat_masks']
 
         # all label component
-        self.gt_bboxes = label['boxes']
-        self.masks = label['mask_target']
-        self.gt_labels = tf.cast(label['classes'], tf.int32)
-        self.num_classes = num_classes
+        gt_bboxes = label['boxes'] # [ymin, xmin, ymax, xmax ]
+        # Change to [xmin, ymin, xmax , ymax ] format
+        gt_bboxes = tf.stack((gt_bboxes[..., 1], gt_bboxes[..., 0], 
+            gt_bboxes[..., 3], gt_bboxes[..., 2]), -1)
+        gt_masks = label['mask_target']
+        gt_labels = tf.cast(label['classes'], tf.int32)
+        self.num_classes = num_classes - 1
         self.model = model
 
         all_level_points, all_level_strides = self.get_points(
             self.model.feature_map_size, tf.float32)
                 
         labels, bbox_targets, label_list, bbox_targets_list, gt_inds = \
-            self.fcos_target(all_level_points, self.gt_bboxes, self.gt_labels)
-        import pdb
-        pdb.set_trace()
+            self.fcos_target(all_level_points, gt_bboxes, gt_labels)
+        
+
+        #decode detection and groundtruth
+        det_bboxes = []
+        det_targets = []
+        num_levels = len(bbox_preds)
+        batch_size = tf.shape(label['boxes'])[0]
+
+        for img_id in range(batch_size):            
+            bbox_pred_list = [
+                tf.reshape(bbox_preds[i][img_id], (-1, 4)) for i in range(
+                    num_levels)
+            ]
+            bbox_target_list =  bbox_targets_list[img_id]
+
+            bboxes = []
+            targets = []
+            for i in range(len(bbox_pred_list)):
+                bbox_pred = bbox_pred_list[i]
+                bbox_target = bbox_target_list[i]
+                points = all_level_points[i]
+                bboxes.append(self._distance2bbox(points, bbox_pred))
+                targets.append(self._distance2bbox(points, bbox_target))
+
+            bboxes = tf.concat (bboxes, axis=0)
+            targets = tf.concat (targets, axis=0)
+
+            det_bboxes.append(bboxes)
+            det_targets.append(targets)
+
+        # flatten cls_scores, bbox_preds and centerness
+        flatten_cls_scores = [
+            tf.reshape(cls_score, (-1, tf.shape(cls_score)[-1]))
+            for cls_score in cls_scores
+        ]
+
+        flatten_bbox_preds = [
+            tf.reshape(bbox_pred, (-1, 4))
+            for bbox_pred in bbox_preds
+        ]
+        flatten_centerness = [
+            tf.reshape(centerness, (-1))
+            for centerness in centernesses
+        ]
+
+        flatten_cls_scores = tf.concat(flatten_cls_scores, axis=0)
+        flatten_bbox_preds = tf.concat(flatten_bbox_preds, axis=0)
+        flatten_centerness = tf.concat(flatten_centerness, axis=0)
+        flatten_labels = tf.concat(labels, axis=0)
+        flatten_bbox_targets = tf.concat(bbox_targets, axis=0)
+
+        # repeat points to align with bbox_preds
+        flatten_points = tf.concat([tf.tile(points, (batch_size,1)) \
+            for points in all_level_points], axis=0)
+        flatten_strides = tf.concat([tf.tile(tf.reshape(strides, (-1,1)), 
+            (batch_size, 1)) for strides in all_level_strides], axis=0)
+
+        pos_inds = tf.where(flatten_labels > 0)
+        num_pos = tf.shape(pos_inds)[0]
+
+        loss_cls = self._focal_conf_sigmoid_loss(
+            flatten_cls_scores, flatten_labels,
+            avg_factor=num_pos + batch_size)
+
+        pos_bbox_preds = tf.gather_nd(flatten_bbox_preds, pos_inds)
+        pos_centerness = tf.gather_nd(flatten_centerness, pos_inds)
+
+        if num_pos > 0:
+            pos_bbox_targets = tf.gather_nd(flatten_bbox_targets, pos_inds)
+            pos_centerness_targets = self._centerness_target(pos_bbox_targets)
+            import pdb
+            pdb.set_trace()
 
     def _loss_location(self):
         pass
 
-    def _loss_class(self):
-        pass
+    def _focal_conf_sigmoid_loss(self, flatten_cls_scores, flatten_labels,
+        avg_factor, focal_loss_alpha=0.25, focal_loss_gamma=2):
+        """
+        Focal loss but using sigmoid like the original paper.
+        """
+        labels = tf.one_hot(flatten_labels, depth=self.num_classes)
+
+        fl = tfa.losses.SigmoidFocalCrossEntropy(from_logits=True, 
+            reduction=tf.keras.losses.Reduction.SUM)
+        loss = fl(y_true=labels, y_pred=flatten_cls_scores)
+
+        return tf.math.divide_no_nan(loss, tf.cast(avg_factor, tf.float32))
 
     def _loss_mask(self, use_cropped_mask=True):
         pass
@@ -88,6 +172,58 @@ class SipMaskLoss(object):
         union = (area1 + area2) - intersection
         ret = intersection / union
         return ret
+
+    def _distance2bbox(self, points, distance):
+        """
+        Decode distance prediction to bounding box.
+
+        Args:
+            points (Tensor): Shape (B, N, 2) or (N, 2).
+            distance (Tensor): Distance from the given point to 4
+                boundaries (left, top, right, bottom). Shape (B, N, 4) or (N, 4)
+
+        Returns:
+            Tensor: Boxes with shape (N, 4) or (B, N, 4)
+        """
+
+        x1 = points[..., 0] - distance[..., 0]
+        y1 = points[..., 1] - distance[..., 1]
+        x2 = points[..., 0] + distance[..., 2]
+        y2 = points[..., 1] + distance[..., 3]
+
+        bboxes = tf.stack([x1, y1, x2, y2], -1)
+        return bboxes
+
+    def _centerness_target(self, pos_bbox_targets):
+        """
+        The center-ness depicts the normalized distance from the location to the
+        center of the object that the location is responsible for. Given the 
+        regression targets l∗, t∗, r∗ and b∗ for a location, the center-ness 
+        target is defined as, 
+                sqrt( min(l∗, r∗)/max(l∗, r∗) * min(t∗, b∗)/max(t∗, b∗))
+
+        We employ sqrt here to slow down the decay of the centerness. 
+        The center-ness ranges from 0 to 1 and is thus trained with binary 
+        cross entropy (BCE) loss.
+
+        Args:
+            pos_bbox_targets: Tensor of shape [Num_pos, 4]. Positive target 
+                                bounding boxes.
+
+        Returns:
+            centerness_targets: Tensor of shape [Num_pos, 4]. Positive target 
+                                Centerness.
+        """
+
+        # only calculate pos centerness targets, otherwise there may be nan
+        left_right = tf.stack((pos_bbox_targets[:,0], pos_bbox_targets[:,2]),-1)
+        top_bottom = tf.stack((pos_bbox_targets[:,1], pos_bbox_targets[:,3]),-1)
+        
+        centerness_targets = \
+            tf.reduce_min(left_right, -1) / tf.reduce_max(left_right, -1) * \
+            tf.reduce_min(top_bottom, -1) / tf.reduce_max(top_bottom, -1)
+
+        return tf.sqrt(centerness_targets)
 
     def fcos_target(self, points, gt_bboxes_list, gt_labels_list):
         '''

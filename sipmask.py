@@ -18,6 +18,10 @@ class SipMask(tf.keras.Model):
     def __init__(self, img_h, img_w, fpn_channels, num_class, 
                 strides=(4, 8, 16, 32, 64), use_dcn=False, 
                 base_model_trainable=False, dcn_trainable=True):
+        """
+        Args:
+            num_class: Num_classes + 1 for background
+        """
         super(SipMask, self).__init__()
         self.strides = strides
         out = ['conv3_block4_out', 'conv4_block6_out', 'conv5_block3_out']
