@@ -143,11 +143,37 @@ class SipMaskLoss(object):
         if num_pos > 0:
             pos_bbox_targets = tf.gather_nd(flatten_bbox_targets, pos_inds)
             pos_centerness_targets = self._centerness_target(pos_bbox_targets)
-            import pdb
-            pdb.set_trace()
 
-    def _loss_location(self):
-        pass
+            pos_points = tf.gather_nd(flatten_points, pos_inds)
+            pos_strides = tf.gather_nd(flatten_strides, pos_inds)
+
+            pos_decoded_bbox_preds = self._distance2bbox(pos_points, 
+                pos_bbox_preds/pos_strides)
+            pos_decoded_target_preds = self._distance2bbox(pos_points,
+                pos_bbox_targets/pos_strides)
+
+            # centerness weighted iou loss
+            loss_bbox = self._loss_location(pos_decoded_target_preds, 
+                pos_decoded_bbox_preds, pos_centerness_targets) / \
+                tf.reduce_sum(pos_centerness_targets)
+
+            loss_centerness = self._loss_centerness(pos_centerness,
+                pos_centerness_targets)
+        else:
+            loss_bbox = tf.reduce_sum(pos_bbox_preds)
+            loss_centerness = tf.reduce_sum(pos_centerness)
+            
+        import pdb
+        pdb.set_trace()
+
+    def _loss_location(self, y_true, y_pred, sample_weight=None):
+        gl = tfa.losses.GIoULoss()
+        return gl(y_true, y_pred, sample_weight)
+
+    def _loss_centerness(self, y_true, y_pred, weight=1.0):
+        loss_centerness = tf.nn.sigmoid_cross_entropy_with_logits(y_true,
+            y_pred)*weight
+        return tf.reduce_mean(loss_centerness)
 
     def _focal_conf_sigmoid_loss(self, flatten_cls_scores, flatten_labels,
         avg_factor, focal_loss_alpha=0.25, focal_loss_gamma=2):
